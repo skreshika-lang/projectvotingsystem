@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Register - TrueVote</title>
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+body{font-family:Arial;background:#f5f7fb;display:flex;justify-content:center;padding:20px}
+.card{background:#fff;max-width:450px;width:100%;padding:25px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,.1)}
+input{width:100%;padding:11px;margin-top:10px;border-radius:6px;border:1px solid #ccc;box-sizing:border-box;font-size:14px}
+button{width:100%;padding:12px;margin-top:12px;background:#0d6efd;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:15px;transition:background 0.2s}
+button:disabled{background:#aaa;cursor:not-allowed}
+video{width:100%;border-radius:10px;background:#000;margin-top:10px;transform:scaleX(-1)}
+#msg{text-align:center;margin-top:10px;font-size:14px;min-height:20px}
+#faceStatus{text-align:center;font-size:13px;color:#0d6efd;margin-top:5px;min-height:18px}
+canvas{display:none}
+.section-title{font-weight:bold;margin-top:14px;color:#333;font-size:14px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2 style="text-align:center">📋 Voter Registration — TrueVote</h2>
+
+  <div class="section-title">Personal Details</div>
+  <input id="name"    placeholder="Full Name" autocomplete="off">
+  <input id="aadhar"  placeholder="Aadhaar Number (12 digits)" maxlength="12" inputmode="numeric">
+  <input id="voterId" placeholder="Voter ID" autocomplete="off">
+  <input id="mobile"  placeholder="Phone Number (10 digits)" maxlength="10" inputmode="numeric">
+
+  <div class="section-title">Face Capture</div>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="faceStatus">Click "Start Camera" to begin</div>
+  <button id="startBtn">📷 Start Camera</button>
+  <button id="captureBtn" style="display:none;background:#28a745">✅ Capture Photo</button>
+  <button id="retakeBtn"  style="display:none;background:#ffc107;color:#000">🔄 Retake Photo</button>
+  <button id="registerBtn" style="display:none;background:#000">🗳️ Register Now</button>
+
+  <div id="msg"></div>
+  <a href="index.html" style="display:block;text-align:center;margin-top:12px;color:#0d6efd">Already Registered? Login →</a>
+</div>
+
+<script>
+const video      = document.getElementById('video');
+const canvas     = document.getElementById('canvas');
+const msg        = document.getElementById('msg');
+const faceStatus = document.getElementById('faceStatus');
+
+let faceData       = null;
+let faceDescriptor = null;
+let currentDesc    = null;
+let isDetecting    = false;    // ✅ FIX: prevent overlapping async calls
+let detectionLoop  = null;
+let cameraStarted  = false;
+
+const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+
+// ─── Load models ──────────────────────────────────────────────
+faceStatus.textContent = '⏳ Loading AI models...';
+document.getElementById('startBtn').disabled = true;
+
+(async () => {
+  try {
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+    // ssdMobilenetv1 optional — skip to speed up load
+    faceStatus.textContent = '✅ AI Ready — Start camera to capture face';
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('startBtn').textContent = '📷 Start Camera';
+  } catch (e) {
+    faceStatus.textContent = '❌ Failed to load AI models. Check internet.';
+  }
+})();
+
+// ─── Live detection loop (runs only while camera is on) ───────
+async function runDetection() {
+  if (isDetecting || faceData) return;  // ✅ skip if busy or already captured
+  isDetecting = true;
+  try {
+    const det = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+
+    if (det) {
+      currentDesc = det.descriptor;
+      faceStatus.textContent = '✅ Face detected — Ready to capture!';
+      document.getElementById('captureBtn').style.display = 'block';
+    } else {
+      currentDesc = null;
+      faceStatus.textContent = '👀 Look straight at the camera...';
+      document.getElementById('captureBtn').style.display = 'none';
+    }
+  } catch (e) {
+    // silently ignore frame errors
+  }
+  isDetecting = false;
+}
+
+// ─── Start Camera ─────────────────────────────────────────────
+document.getElementById('startBtn').onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: 640, height: 480 }
+    });
+    video.srcObject = stream;
+    await new Promise(r => video.onloadedmetadata = r);
+    video.play();
+    cameraStarted = true;
+    document.getElementById('startBtn').style.display = 'none';
+    faceStatus.textContent = '👀 Look straight at the camera...';
+
+    // ✅ FIX: 500ms interval with isDetecting lock — no overlapping calls
+    detectionLoop = setInterval(runDetection, 500);
+  } catch (e) {
+    faceStatus.textContent = '❌ Camera denied — please allow camera access';
+  }
+};
+
+// ─── Capture ──────────────────────────────────────────────────
+document.getElementById('captureBtn').onclick = () => {
+  if (!currentDesc) {
+    faceStatus.textContent = '⚠️ Face not ready yet — wait a moment';
+    return;
+  }
+  // Stop the live detection loop
+  clearInterval(detectionLoop);
+  isDetecting = false;
+
+  // Draw snapshot
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  faceData       = canvas.toDataURL('image/jpeg', 0.85);
+  faceDescriptor = Array.from(currentDesc);
+
+  // Pause video preview
+  video.pause();
+  faceStatus.style.color = 'green';
+  faceStatus.textContent = '✅ Photo captured successfully!';
+  msg.textContent = '';
+
+  document.getElementById('captureBtn').style.display  = 'none';
+  document.getElementById('retakeBtn').style.display   = 'block';
+  document.getElementById('registerBtn').style.display = 'block';
+};
+
+// ─── Retake ───────────────────────────────────────────────────
+document.getElementById('retakeBtn').onclick = () => {
+  faceData = null; faceDescriptor = null; currentDesc = null;
+  video.play();
+  faceStatus.style.color = '#0d6efd';
+  faceStatus.textContent = '👀 Look at the camera...';
+  document.getElementById('captureBtn').style.display  = 'none';
+  document.getElementById('retakeBtn').style.display   = 'none';
+  document.getElementById('registerBtn').style.display = 'none';
+  // Restart detection loop
+  detectionLoop = setInterval(runDetection, 500);
+};
+
+// ─── Register ─────────────────────────────────────────────────
+document.getElementById('registerBtn').onclick = async () => {
+  const name         = document.getElementById('name').value.trim();
+  const aadharNumber = document.getElementById('aadhar').value.trim();
+  const voterId      = document.getElementById('voterId').value.trim();
+  const mobileNumber = document.getElementById('mobile').value.trim();
+
+  if (!name || !aadharNumber || !voterId || !mobileNumber || !faceData) {
+    msg.style.color = 'red';
+    msg.textContent = '⚠️ Fill all fields and capture your photo first';
+    return;
+  }
+  if (aadharNumber.length !== 12) { msg.style.color='red'; msg.textContent='⚠️ Aadhaar must be 12 digits'; return; }
+  if (mobileNumber.length !== 10) { msg.style.color='red'; msg.textContent='⚠️ Phone must be 10 digits'; return; }
+
+  msg.style.color = '#0d6efd';
+  msg.textContent = '⏳ Registering... please wait';
+  document.getElementById('registerBtn').disabled = true;
+
+  try {
+    const res  = await fetch('/api/auth/register', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ name, aadharNumber, mobileNumber, voterId, faceData, faceDescriptor })
+    });
+    const data = await res.json();
+    msg.style.color = res.ok ? 'green' : 'red';
+    msg.textContent = data.message;
+    if (res.ok) {
+      alert('✅ Registered successfully! You can now login.');
+      location.href = 'index.html';
+    } else {
+      document.getElementById('registerBtn').disabled = false;
+    }
+  } catch (e) {
+    msg.style.color = 'red';
+    msg.textContent = '❌ Server error — Make sure the backend is running on port 10000';
+    document.getElementById('registerBtn').disabled = false;
+  }
+};
+</script>
+</body>
+</html>

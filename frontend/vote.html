@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Vote - TrueVote</title>
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+body{font-family:Arial;background:#f5f7fb;display:flex;justify-content:center;padding:15px}
+.card{background:#fff;max-width:500px;width:100%;padding:20px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,.1);text-align:center}
+video{width:100%;border-radius:10px;background:#000;transform:scaleX(-1);margin-top:10px}
+button{width:100%;padding:14px;margin-top:12px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:16px}
+#startBtn{background:#0d6efd;color:#fff}
+.candidate{padding:14px;margin-top:10px;background:#f1f1f1;border-radius:8px;cursor:pointer;border:2px solid transparent;font-size:16px;transition:all 0.2s}
+.candidate:hover{border-color:#0d6efd;background:#e8f0fe;transform:scale(1.02)}
+#status{margin-top:12px;color:#0d6efd;font-weight:bold;min-height:24px;font-size:15px}
+#blinkDisplay{font-size:14px;margin-top:6px;color:#333}
+#progressBar{height:8px;background:#e0e0e0;border-radius:4px;margin-top:8px;overflow:hidden}
+#progressFill{height:100%;background:#0d6efd;width:0%;transition:width 0.3s;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>🔒 Face Liveness Check</h2>
+  <p>Hi <span id="userName"></span>, verify your identity to vote</p>
+  <video id="video" autoplay muted playsinline></video>
+  <div id="progressBar"><div id="progressFill"></div></div>
+  <div id="status">⏳ Loading AI Models... Please wait</div>
+  <div id="blinkDisplay">Blinks detected: <strong id="blinkCount">0</strong> / 2</div>
+  <button id="startBtn" disabled>⏳ Loading Models...</button>
+  <div id="voteArea" style="display:none;margin-top:15px">
+    <h3>✅ Identity Verified — Select Your Party</h3>
+    <div class="candidate" onclick="vote('BJP')">🪷 BJP</div>
+    <div class="candidate" onclick="vote('Congress')">✋ Congress</div>
+    <div class="candidate" onclick="vote('AAP')">🧹 AAP</div>
+    <div class="candidate" onclick="vote('NOTA')">⬜ NOTA</div>
+  </div>
+</div>
+
+<script>
+const video       = document.getElementById('video');
+const statusEl    = document.getElementById('status');
+const blinkCount  = document.getElementById('blinkCount');
+const progressFill= document.getElementById('progressFill');
+const startBtn    = document.getElementById('startBtn');
+
+let blinks = 0;
+let verified = false;
+let wasEyeOpen = true;      // tracks eye state between frames
+let isDetecting = false;    // ✅ FIX: prevents overlapping async detections
+let detectionLoop = null;
+
+const user = JSON.parse(localStorage.getItem('user') || '{}');
+document.getElementById('userName').textContent = user.name || 'Voter';
+
+// ─── Load Models ─────────────────────────────────────────────
+const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+
+(async () => {
+  try {
+    statusEl.textContent = '⏳ Loading AI models (1/2)...';
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+    statusEl.textContent = '✅ AI Ready — Click Start Verification';
+    startBtn.disabled = false;
+    startBtn.textContent = '▶️ Start Verification';
+  } catch (e) {
+    statusEl.textContent = '❌ Failed to load AI models. Check internet connection.';
+    console.error('Model load error:', e);
+  }
+})();
+
+// ─── EAR (Eye Aspect Ratio) helper ───────────────────────────
+function eyeAspectRatio(eye) {
+  const A = dist(eye[1], eye[5]);
+  const B = dist(eye[2], eye[4]);
+  const C = dist(eye[0], eye[3]);
+  return (A + B) / (2.0 * C);
+}
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// ─── Main detection loop ──────────────────────────────────────
+async function runDetection() {
+  if (verified || isDetecting) return; // ✅ skip if already processing
+  isDetecting = true;
+
+  try {
+    const det = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
+      .withFaceLandmarks();
+
+    if (!det) {
+      statusEl.textContent = '👀 No face detected — Look straight at camera';
+      wasEyeOpen = true;
+      isDetecting = false;
+      return;
+    }
+
+    const box    = det.detection.box;
+    const boxPct = (box.width * box.height) / (video.videoWidth * video.videoHeight) * 100;
+
+    // ── Proximity guidance ──
+    if (boxPct < 5) {
+      statusEl.textContent = '📏 Move closer to the camera';
+      isDetecting = false;
+      return;
+    }
+    if (boxPct > 35) {
+      statusEl.textContent = '📏 Move slightly back';
+      isDetecting = false;
+      return;
+    }
+
+    // ── Blink detection using EAR ──
+    const leftEye  = det.landmarks.getLeftEye();
+    const rightEye = det.landmarks.getRightEye();
+    const ear = (eyeAspectRatio(leftEye) + eyeAspectRatio(rightEye)) / 2;
+
+    // EAR < 0.22 = eyes closed; > 0.26 = eyes open
+    const eyesClosed = ear < 0.22;
+    const eyesOpen   = ear > 0.26;
+
+    if (eyesClosed && wasEyeOpen) {
+      // Transition: open → closed = one blink
+      wasEyeOpen = false;
+    } else if (eyesOpen && !wasEyeOpen) {
+      // Transition: closed → open = blink complete ✅
+      wasEyeOpen = true;
+      blinks++;
+      blinkCount.textContent = blinks;
+      progressFill.style.width = (blinks / 2 * 100) + '%';
+
+      if (blinks === 1) {
+        statusEl.textContent = '👍 1 blink detected — Blink once more!';
+      }
+      if (blinks >= 2) {
+        verified = true;
+        clearInterval(detectionLoop);
+        statusEl.textContent = '✅ Liveness Verified! Choose your party below.';
+        progressFill.style.width = '100%';
+        video.pause();
+        document.getElementById('voteArea').style.display = 'block';
+      }
+    } else if (!verified) {
+      if (blinks === 0) statusEl.textContent = '👁️ Face detected — Blink naturally once!';
+    }
+
+  } catch (e) {
+    console.warn('Detection frame error:', e.message);
+  }
+
+  isDetecting = false; // ✅ always release the lock
+}
+
+// ─── Start button ─────────────────────────────────────────────
+startBtn.onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } });
+    video.srcObject = stream;
+    await new Promise(r => video.onloadedmetadata = r);
+    video.play();
+    startBtn.style.display = 'none';
+    statusEl.textContent = '👁️ Camera ready — Look at the camera and blink!';
+    blinks = 0; verified = false; wasEyeOpen = true;
+
+    // ✅ FIX: Use 400ms interval — fast enough to catch blinks but
+    //         the isDetecting flag prevents overlapping async calls
+    detectionLoop = setInterval(runDetection, 400);
+  } catch (e) {
+    statusEl.textContent = '❌ Camera access denied — Please allow camera permission';
+    console.error('Camera error:', e);
+  }
+};
+
+// ─── Vote ──────────────────────────────────────────────────────
+async function vote(party) {
+  if (!confirm(`Confirm your vote for ${party}?`)) return;
+  const btn = event.currentTarget;
+  btn.style.opacity = '0.5';
+  btn.style.pointerEvents = 'none';
+  try {
+    const res  = await fetch('/api/vote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aadharNumber: user.aadharNumber, votedFor: party })
+    });
+    const data = await res.json();
+    alert(data.message);
+    if (res.ok) location.href = 'results.html';
+    else { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
+  } catch (e) {
+    alert('Network error. Please try again.');
+    btn.style.opacity = '1';
+    btn.style.pointerEvents = '';
+  }
+}
+</script>
+</body>
+</html>
